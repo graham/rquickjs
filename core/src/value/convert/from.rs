@@ -1,6 +1,6 @@
 use crate::{
-    handle_exception, Array, Ctx, Error, FromAtom, FromJs, Object, Result, StdString, String, Type,
-    Value,
+    handle_exception, Array, Ctx, Error, Filter, FromAtom, FromJs, Object, Result, StdString,
+    String, Type, Value,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -16,6 +16,75 @@ use either::{Either, Left, Right};
 
 #[cfg(feature = "indexmap")]
 use indexmap::{IndexMap, IndexSet};
+
+use serde_json;
+
+impl<'js> FromJs<'js> for serde_json::Value {
+    fn from_js(ctx: Ctx<'js>, v: Value<'js>) -> Result<Self> {
+        Result::Ok(match v.type_of() {
+            Type::Uninitialized => serde_json::json!("undefined"),
+            Type::Undefined => serde_json::json!("undefined"),
+            Type::Null => serde_json::json!("null"),
+            Type::Bool => serde_json::json!(v.as_bool().unwrap_or(false)),
+            Type::Int => serde_json::json!(v.as_int().unwrap_or(0)),
+            Type::Float => serde_json::json!(v.as_float().unwrap_or(0.0)),
+            Type::String => {
+                serde_json::json!(v
+                    .as_string()
+                    .unwrap_or(&String::from_str(ctx, "")?)
+                    .to_string()
+                    .unwrap_or(std::string::String::from("")))
+            }
+            Type::Symbol => serde_json::json!("symbol"),
+            Type::Array => {
+                let empty = &Array::new(ctx)?;
+                serde_json::Value::Array(
+                    v.as_array()
+                        .unwrap_or(empty)
+                        .iter::<Value>()
+                        .filter_map(|v| match v {
+                            Ok(v) => Some(v),
+                            Err(_) => None,
+                        })
+                        .map(|v| serde_json::Value::from_js(ctx, v.clone()).unwrap().into())
+                        .collect::<Vec<serde_json::Value>>(),
+                )
+            }
+            Type::Function => serde_json::json!("function"),
+            Type::Object => {
+                let mut value = serde_json::Map::new();
+                let object = v.as_object().unwrap();
+
+                // Internal rust types that are exposed with a macro have
+                // no keys here, so return as {}. Not sure how to get
+                // the serde_json::to_string for this type.
+
+                let keys: Vec<StdString> = object
+                    .own_keys(Filter::new().string())
+                    .collect::<Result<_>>()
+                    .unwrap();
+
+                let values = keys
+                    .into_iter()
+                    .filter_map(
+                        |key| match object.get::<std::string::String, Value>(key.clone()) {
+                            Ok(value) => Some((key, value)),
+                            Err(_err) => None,
+                        },
+                    )
+                    .collect::<Vec<(std::string::String, Value)>>();
+
+                for (k, v) in values.into_iter() {
+                    value.insert(k.clone(), serde_json::Value::from_js(ctx, v)?.into());
+                }
+
+                serde_json::Value::Object(value)
+            }
+            Type::Module => serde_json::json!("module"),
+            Type::Unknown => panic!("Unknown type"),
+        })
+    }
+}
 
 impl<'js> FromJs<'js> for Value<'js> {
     fn from_js(_: Ctx<'js>, value: Value<'js>) -> Result<Self> {
